@@ -1,0 +1,31 @@
+name: ready-when-green
+
+# Self-contained variant for repos whose workflow policy forbids calling reusable workflows from
+# other repos (every job must declare its own Ubicloud runner). Logic is copied from
+# __CENTRAL__/.github/workflows/ready-when-green.yml by rollout.sh; do not edit by hand.
+on:
+  workflow_run:
+    workflows: [__WORKFLOWS__]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  ready:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      (startsWith(github.event.workflow_run.head_branch, 'agent/') ||
+       startsWith(github.event.workflow_run.head_branch, 'claude/') ||
+       startsWith(github.event.workflow_run.head_branch, 'codex/'))
+    runs-on: ubicloud-standard-2
+    permissions:
+__JOBPERMS__
+    env:
+      GH_TOKEN: ${{ secrets.READY_TOKEN || github.token }}
+      GH_REPO: ${{ github.repository }}
+      BRANCH: ${{ github.event.workflow_run.head_branch }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+__STEPS__

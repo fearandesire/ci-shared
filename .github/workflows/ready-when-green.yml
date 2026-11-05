@@ -4,6 +4,11 @@ name: ready-when-green
 # Marks a draft PR ready for review once every check on its current head commit is green.
 on:
   workflow_call:
+    inputs:
+      runner:
+        description: Runner label. Ubicloud by default; override only for a repo without Ubicloud.
+        type: string
+        default: ubicloud-standard-2
     secrets:
       READY_TOKEN:
         description: Optional PAT or App token. Needed only if ready_for_review workflows must fire.
@@ -21,7 +26,7 @@ jobs:
       (startsWith(github.event.workflow_run.head_branch, 'agent/') ||
        startsWith(github.event.workflow_run.head_branch, 'claude/') ||
        startsWith(github.event.workflow_run.head_branch, 'codex/'))
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     permissions:
       contents: write # gh pr ready fails with "Resource not accessible" without it (cli/cli#8910)
       pull-requests: write
