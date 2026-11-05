@@ -1,0 +1,58 @@
+name: ready-when-green
+
+# Reusable workflow. Call it from a workflow_run stub in each repo (see caller.yml.tmpl).
+# Marks a draft PR ready for review once every check on its current head commit is green.
+on:
+  workflow_call:
+    secrets:
+      READY_TOKEN:
+        description: Optional PAT or App token. Needed only if ready_for_review workflows must fire.
+        required: false
+
+permissions: {}
+
+jobs:
+  ready:
+    # Same-repo branches only; fork PRs and failed CI runs are skipped.
+    # Filtering here (not in a step) keeps non-agent runs unbilled: skipped jobs cost no minutes.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      (startsWith(github.event.workflow_run.head_branch, 'agent/') ||
+       startsWith(github.event.workflow_run.head_branch, 'claude/') ||
+       startsWith(github.event.workflow_run.head_branch, 'codex/'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh pr ready fails with "Resource not accessible" without it (cli/cli#8910)
+      pull-requests: write
+      checks: read
+      statuses: read
+    env:
+      GH_TOKEN: ${{ secrets.READY_TOKEN || github.token }}
+      GH_REPO: ${{ github.repository }}
+      # Passed via env, never interpolated into the script: branch names are untrusted input.
+      BRANCH: ${{ github.event.workflow_run.head_branch }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Mark green draft PRs ready
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ready only when: still draft, not labelled agent-needs-human, head is the commit
+          # CI just ran on, and every check/status on that commit is complete and green.
+          prs=$(gh pr list --head "$BRANCH" --state open --draft \
+            --json number,headRefOid,labels,statusCheckRollup --jq '
+              .[]
+              | select(.headRefOid == env.SHA)
+              | select(all(.labels[].name; . != "agent-needs-human"))
+              | select(.statusCheckRollup | length > 0)
+              | select(all(.statusCheckRollup[];
+                  ((.status == "COMPLETED") and (.conclusion | IN("SUCCESS","NEUTRAL","SKIPPED")))
+                  or .state == "SUCCESS"))
+              | .number')
+
+          if [ -z "$prs" ]; then echo "nothing ready yet for $BRANCH @ ${SHA:0:7}"; exit 0; fi
+          for n in $prs; do
+            gh pr ready "$n"
+            echo "marked #$n ready"
+          done
