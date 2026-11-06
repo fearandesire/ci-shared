@@ -18,6 +18,13 @@ The stub lists every workflow in the target repo under `workflow_run`; the last 
 re-checks the whole check set. Trim that list if it is noisy.
 
 Notes:
+- Both the caller and reusable job need `actions: read`: `gh pr list --json
+  statusCheckRollup` also queries `checkSuite.workflowRun`. Without it, GitHub returns
+  `Resource not accessible by integration` before the PR can be marked ready.
+  Existing callers must add this permission as well as adopt the updated reusable workflow;
+  a called workflow cannot increase its caller's permissions. Normal inline rollouts include
+  it too. For `--readonly`, the supplied `READY_TOKEN` needs the corresponding Actions read
+  access in addition to its PR/check/status permissions.
 - Uses `GITHUB_TOKEN` with `contents: write` (needed by `gh pr ready`). Pass a `READY_TOKEN`
   secret (PAT or App token) only if `ready_for_review` workflows must fire.
 - This repo is private. Its Actions access is set to "accessible from repositories owned by the

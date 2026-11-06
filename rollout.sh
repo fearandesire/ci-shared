@@ -41,7 +41,7 @@ render() { # $1 = JSON-quoted, comma-separated workflow names
     local steps perms
     steps="$(sed -n '/^      - name: Mark green draft PRs ready/,$p' "$HOST_WF")"
     if [ "$MODE" = readonly ]; then perms="      contents: read"
-    else perms="$(printf '      contents: write\n      pull-requests: write\n      checks: read\n      statuses: read')"; fi
+    else perms="$(printf '      actions: read\n      contents: write\n      pull-requests: write\n      checks: read\n      statuses: read')"; fi
     out="${out//__STEPS__/"$steps"}"
     out="${out//__JOBPERMS__/"$perms"}"
   fi
