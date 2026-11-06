@@ -37,7 +37,14 @@ elif a[:2] == ['api', 'graphql']:
     if f.get('api_error'):
         print('GraphQL query failed', file=sys.stderr)
         sys.exit(1)
-    for page in f['pages']:
+    rounds = f.get('rounds')
+    if rounds:
+        calls = [json.loads(line) for line in pathlib.Path(os.environ['CALLS']).read_text().splitlines()]
+        index = sum(c[:2] == ['api', 'graphql'] for c in calls) - 1
+        pages = rounds[min(index, len(rounds)-1)]
+    else:
+        pages = f['pages']
+    for page in pages:
         emit(page)
 elif a[:2] == ['pr', 'ready']:
     if f.get('mutation_error'):
@@ -72,7 +79,7 @@ def checks(data, page=0):
 
 
 class ReadyTests(unittest.TestCase):
-    def run_case(self, data, dry=False):
+    def run_case(self, data, dry=False, wait=0):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             gh = root / 'gh'
@@ -82,7 +89,7 @@ class ReadyTests(unittest.TestCase):
             env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'],
                        FIXTURE=str(root / 'fixture.json'), CALLS=str(root / 'calls.jsonl'),
                        GH_REPO='owner/repo', BRANCH='agent/example', SHA='abc123',
-                       DRY_RUN='1' if dry else '0')
+                       DRY_RUN='1' if dry else '0', WAIT_SECONDS=str(wait), POLL_SECONDS='0')
             result = subprocess.run(['bash', '-c', script()], env=env, text=True, capture_output=True)
             calls = [json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines()]
             return result, [c for c in calls if c[:2] == ['pr', 'ready']]
@@ -172,6 +179,39 @@ class ReadyTests(unittest.TestCase):
         self.assertIn('head_repository.full_name == github.repository', text)
         for prefix in ('agent/', 'claude/', 'codex/'):
             self.assertIn("head_branch, '" + prefix + "'", text)
+
+    def test_pending_review_is_rechecked_then_promoted(self):
+        data = fixture()
+        pending = copy.deepcopy(data['pages'])
+        pending[0]['data']['repository']['pullRequest']['commits']['nodes'][0]['commit']['statusCheckRollup']['contexts']['nodes'].append({'status': 'IN_PROGRESS'})
+        data['rounds'] = [pending, data['pages']]
+        result, mutations = self.run_case(data, wait=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('rechecking', result.stdout)
+        self.assertEqual(len(mutations), 1)
+
+    def test_head_or_hold_change_while_waiting_never_promotes(self):
+        for change in ('head', 'hold'):
+            data = fixture()
+            pending = copy.deepcopy(data['pages'])
+            pending[0]['data']['repository']['pullRequest']['commits']['nodes'][0]['commit']['statusCheckRollup']['contexts']['nodes'].append({'status': 'IN_PROGRESS'})
+            changed = copy.deepcopy(data['pages'])
+            if change == 'head':
+                changed[0]['data']['repository']['pullRequest']['headRefOid'] = 'new-head'
+            else:
+                changed[0]['data']['repository']['pullRequest']['labels']['nodes'] = [{'name': 'agent-needs-human'}]
+            data['rounds'] = [pending, changed]
+            result, mutations = self.run_case(data, wait=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(mutations, [])
+
+    def test_dry_run_does_not_wait_on_its_own_check(self):
+        data = fixture()
+        checks(data).append({'status': 'IN_PROGRESS'})
+        result, mutations = self.run_case(data, dry=True, wait=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('rechecking', result.stdout)
+        self.assertEqual(mutations, [])
 
 
 if __name__ == '__main__':

@@ -11,6 +11,14 @@ permissions:
   statuses: read
 
 jobs:
+  delayed-canary-check:
+    if: startsWith(github.head_ref, 'agent/ready-canary-')
+    runs-on: ubicloud-standard-2
+    steps:
+      - name: Deliberately finish after the promotion monitor starts
+        run: sleep 60
+      - name: Keep the external-check canary pending for another poll
+        run: sleep 30
   test:
     runs-on: ubicloud-standard-2
     steps:

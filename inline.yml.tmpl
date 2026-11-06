@@ -20,6 +20,10 @@ jobs:
        startsWith(github.event.workflow_run.head_branch, 'claude/') ||
        startsWith(github.event.workflow_run.head_branch, 'codex/'))
     runs-on: ubicloud-standard-2
+    timeout-minutes: 25
+    concurrency:
+      group: ready-${{ github.repository }}-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: true
     permissions:
 __JOBPERMS__
     env:
