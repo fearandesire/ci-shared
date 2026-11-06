@@ -27,6 +27,10 @@ jobs:
        startsWith(github.event.workflow_run.head_branch, 'claude/') ||
        startsWith(github.event.workflow_run.head_branch, 'codex/'))
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 25
+    concurrency:
+      group: ready-${{ github.repository }}-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: true
     permissions:
       contents: write # gh pr ready fails with "Resource not accessible" without it (cli/cli#8910)
       pull-requests: write
@@ -43,8 +47,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Ready only when: still draft, not labelled agent-needs-human, head is the commit
-          # CI just ran on, and every check/status on that commit is complete and green.
+          wait_seconds=${WAIT_SECONDS:-1200}
+          poll_seconds=${POLL_SECONDS:-20}
+          [[ "$wait_seconds" =~ ^[0-9]{1,4}$ && "$poll_seconds" =~ ^[0-9]{1,2}$ ]] || exit 2
+          wait_seconds=$((10#$wait_seconds))
+          poll_seconds=$((10#$poll_seconds))
+          ((wait_seconds <= 1200 && poll_seconds <= 60)) || exit 2
+          if [ "${DRY_RUN:-0}" = 1 ]; then wait_seconds=0; fi
+          # A later external review may not emit a matching workflow_run event.
+          # Wait only while checks are pending, on this same head, within a fixed budget.
           prs=$(gh pr list --head "$BRANCH" --state open --draft \
             --json number,headRefOid,labels --jq '
               .[]
@@ -54,51 +65,70 @@ jobs:
 
           if [ -z "$prs" ]; then echo "nothing ready yet for $BRANCH @ ${SHA:0:7}"; exit 0; fi
           for n in $prs; do
-            echo "checking #$n at ${SHA:0:7}"
-            # gh's statusCheckRollup expansion reads checkSuite.workflowRun, requiring
-            # Actions read. Ask only for check/status fields so existing callers keep
-            # their original permission contract. Paginate: a late failing check must
-            # not be hidden beyond the first 100 results.
-            pages=$(gh api graphql --paginate \
-              -F owner="${GH_REPO%/*}" -F name="${GH_REPO#*/}" -F number="$n" \
-              -f query='
-                query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
-                  repository(owner: $owner, name: $name) {
-                    pullRequest(number: $number) {
-                      headRefOid isDraft
-                      headRepository { nameWithOwner }
-                      labels(first: 100) { nodes { name } labelPage: pageInfo { hasNextPage } }
-                      commits(last: 1) { nodes { commit { statusCheckRollup {
-                        contexts(first: 100, after: $endCursor) {
-                          nodes {
-                            ... on CheckRun { status conclusion }
-                            ... on StatusContext { state }
+            deadline=$((SECONDS + wait_seconds))
+            while :; do
+              echo "checking #$n at ${SHA:0:7}"
+              # Ask only for check/status fields, not checkSuite.workflowRun.
+              # Paginate so a late failure cannot hide beyond the first 100 checks.
+              pages=$(gh api graphql --paginate \
+                -F owner="${GH_REPO%/*}" -F name="${GH_REPO#*/}" -F number="$n" \
+                -f query='
+                  query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+                    repository(owner: $owner, name: $name) {
+                      pullRequest(number: $number) {
+                        headRefOid isDraft
+                        headRepository { nameWithOwner }
+                        labels(first: 100) { nodes { name } labelPage: pageInfo { hasNextPage } }
+                        commits(last: 1) { nodes { commit { statusCheckRollup {
+                          contexts(first: 100, after: $endCursor) {
+                            nodes {
+                              ... on CheckRun { status conclusion }
+                              ... on StatusContext { state }
+                            }
+                            pageInfo { hasNextPage endCursor }
                           }
-                          pageInfo { hasNextPage endCursor }
-                        }
-                      } } } }
+                        } } } }
+                      }
                     }
-                  }
-                }' --jq '
-                .data.repository.pullRequest
-                | (.commits.nodes[0].commit.statusCheckRollup.contexts.nodes // []) as $checks
-                | (.isDraft == true)
-                  and (.headRefOid == env.SHA)
-                  and (.headRepository.nameWithOwner == env.GH_REPO)
-                  and (.labels.labelPage.hasNextPage == false)
-                  and all(.labels.nodes[].name; . != "agent-needs-human")
-                  and ($checks | length > 0)
-                  and all($checks[];
-                    ((.status == "COMPLETED") and (.conclusion | IN("SUCCESS","NEUTRAL","SKIPPED")))
-                    or .state == "SUCCESS")')
-            if [ -z "$pages" ] || grep -qvx true <<< "$pages"; then
-              echo "#$n is held, changed, or has unfinished/non-green checks"
-              continue
-            fi
-            if [ "${DRY_RUN:-0}" = 1 ]; then
-              echo "would mark #$n ready (dry run)"
-            else
-              gh pr ready "$n"
-              echo "marked #$n ready"
-            fi
+                  }' --jq '
+                  .data.repository.pullRequest
+                  | (.commits.nodes[0].commit.statusCheckRollup.contexts.nodes // []) as $checks
+                  | if (.isDraft != true)
+                       or (.headRefOid != env.SHA)
+                       or (.headRepository.nameWithOwner != env.GH_REPO)
+                       or (.labels.labelPage.hasNextPage != false)
+                       or any(.labels.nodes[].name; . == "agent-needs-human")
+                    then "held"
+                    elif ($checks | length == 0) then "pending"
+                    elif all($checks[];
+                      ((.status == "COMPLETED") and (.conclusion | IN("SUCCESS","NEUTRAL","SKIPPED")))
+                      or .state == "SUCCESS")
+                    then "green"
+                    elif any($checks[];
+                      ((.status == "COMPLETED") and (.conclusion |
+                        IN("FAILURE","CANCELLED","TIMED_OUT","ACTION_REQUIRED","STALE","STARTUP_FAILURE")))
+                      or (.state | IN("ERROR","FAILURE")))
+                    then "blocked"
+                    else "pending" end')
+              if [ -z "$pages" ] || grep -qE '^(held|blocked)$' <<< "$pages"; then
+                echo "#$n is held, changed, or has a failed check"
+                break
+              fi
+              if grep -qvx green <<< "$pages"; then
+                if ((SECONDS >= deadline)); then
+                  echo "#$n still has pending checks; wait budget exhausted"
+                  break
+                fi
+                echo "#$n has pending checks; rechecking in $poll_seconds seconds"
+                sleep "$poll_seconds"
+                continue
+              fi
+              if [ "${DRY_RUN:-0}" = 1 ]; then
+                echo "would mark #$n ready (dry run)"
+              else
+                gh pr ready "$n"
+                echo "marked #$n ready"
+              fi
+              break
+            done
           done

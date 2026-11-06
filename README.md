@@ -13,6 +13,11 @@ branches. `agent-needs-human` holds the PR. Empty check sets, fork heads, change
 heads, API errors and uninspected label pages never promote. Check results paginate
 past 100 so a late failure cannot be missed.
 
+Pending checks are re-read every 20 seconds for at most 20 minutes. This covers an
+external review that finishes after CI without emitting a matching workflow event.
+An obsolete head, hold label or failed check stops the monitor; a newer matching
+workflow completion cancels the older monitor for that branch. Dry runs never wait.
+
 The caller token needs `contents: write`, `pull-requests: write`, `checks: read` and
 `statuses: read`. **Actions read is not needed.** The implementation requests only
 check/status fields; `gh pr list --json statusCheckRollup` expands workflow metadata
@@ -60,7 +65,9 @@ bash -n rollout.sh
 
 PR CI runs regression cases and executes the candidate query using a real token with
 no Actions permission. After merge, create a draft PR on `agent/ready-canary-*`, wait
-for its checks, and dispatch `ready-canary` with its PR number. The canary uses the
+for its main test and secret scan, then dispatch `ready-canary` while its deliberate
+delayed check is still pending. The monitor must wait and then promote after that
+check succeeds. The canary uses the
 original caller permissions, can touch only that dedicated branch prefix in this
 repository, and fails unless the PR actually becomes ready. Close the canary afterward.
 
