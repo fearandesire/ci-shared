@@ -28,7 +28,6 @@ jobs:
        startsWith(github.event.workflow_run.head_branch, 'codex/'))
     runs-on: ${{ inputs.runner }}
     permissions:
-      actions: read # gh's statusCheckRollup query includes checkSuite.workflowRun
       contents: write # gh pr ready fails with "Resource not accessible" without it (cli/cli#8910)
       pull-requests: write
       checks: read
@@ -47,18 +46,59 @@ jobs:
           # Ready only when: still draft, not labelled agent-needs-human, head is the commit
           # CI just ran on, and every check/status on that commit is complete and green.
           prs=$(gh pr list --head "$BRANCH" --state open --draft \
-            --json number,headRefOid,labels,statusCheckRollup --jq '
+            --json number,headRefOid,labels --jq '
               .[]
               | select(.headRefOid == env.SHA)
               | select(all(.labels[].name; . != "agent-needs-human"))
-              | select(.statusCheckRollup | length > 0)
-              | select(all(.statusCheckRollup[];
-                  ((.status == "COMPLETED") and (.conclusion | IN("SUCCESS","NEUTRAL","SKIPPED")))
-                  or .state == "SUCCESS"))
               | .number')
 
           if [ -z "$prs" ]; then echo "nothing ready yet for $BRANCH @ ${SHA:0:7}"; exit 0; fi
           for n in $prs; do
-            gh pr ready "$n"
-            echo "marked #$n ready"
+            echo "checking #$n at ${SHA:0:7}"
+            # gh's statusCheckRollup expansion reads checkSuite.workflowRun, requiring
+            # Actions read. Ask only for check/status fields so existing callers keep
+            # their original permission contract. Paginate: a late failing check must
+            # not be hidden beyond the first 100 results.
+            pages=$(gh api graphql --paginate \
+              -F owner="${GH_REPO%/*}" -F name="${GH_REPO#*/}" -F number="$n" \
+              -f query='
+                query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+                  repository(owner: $owner, name: $name) {
+                    pullRequest(number: $number) {
+                      headRefOid isDraft
+                      headRepository { nameWithOwner }
+                      labels(first: 100) { nodes { name } labelPage: pageInfo { hasNextPage } }
+                      commits(last: 1) { nodes { commit { statusCheckRollup {
+                        contexts(first: 100, after: $endCursor) {
+                          nodes {
+                            ... on CheckRun { status conclusion }
+                            ... on StatusContext { state }
+                          }
+                          pageInfo { hasNextPage endCursor }
+                        }
+                      } } } }
+                    }
+                  }
+                }' --jq '
+                .data.repository.pullRequest
+                | (.commits.nodes[0].commit.statusCheckRollup.contexts.nodes // []) as $checks
+                | (.isDraft == true)
+                  and (.headRefOid == env.SHA)
+                  and (.headRepository.nameWithOwner == env.GH_REPO)
+                  and (.labels.labelPage.hasNextPage == false)
+                  and all(.labels.nodes[].name; . != "agent-needs-human")
+                  and ($checks | length > 0)
+                  and all($checks[];
+                    ((.status == "COMPLETED") and (.conclusion | IN("SUCCESS","NEUTRAL","SKIPPED")))
+                    or .state == "SUCCESS")')
+            if [ -z "$pages" ] || grep -qvx true <<< "$pages"; then
+              echo "#$n is held, changed, or has unfinished/non-green checks"
+              continue
+            fi
+            if [ "${DRY_RUN:-0}" = 1 ]; then
+              echo "would mark #$n ready (dry run)"
+            else
+              gh pr ready "$n"
+              echo "marked #$n ready"
+            fi
           done

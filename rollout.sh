@@ -41,7 +41,7 @@ render() { # $1 = JSON-quoted, comma-separated workflow names
     local steps perms
     steps="$(sed -n '/^      - name: Mark green draft PRs ready/,$p' "$HOST_WF")"
     if [ "$MODE" = readonly ]; then perms="      contents: read"
-    else perms="$(printf '      actions: read\n      contents: write\n      pull-requests: write\n      checks: read\n      statuses: read')"; fi
+    else perms="$(printf '      contents: write\n      pull-requests: write\n      checks: read\n      statuses: read')"; fi
     out="${out//__STEPS__/"$steps"}"
     out="${out//__JOBPERMS__/"$perms"}"
   fi
@@ -75,11 +75,6 @@ for repo in "$@"; do
   cd "$dir"
   def="$(git symbolic-ref --short HEAD)"
 
-  if [ -f "$FILE" ]; then
-    if [ "$MODE" = caller ] && grep -q "@$REF\b" "$FILE"; then echo "   already on $REF at $def, skipping"; cd "$work"; continue; fi
-    if [ "$MODE" != caller ] && grep -q 'Self-contained variant' "$FILE"; then echo "   inline stub already on $def, skipping"; cd "$work"; continue; fi
-  fi
-
   # Every workflow in the repo except the stub itself, as JSON strings (valid YAML flow scalars).
   list=$(gh workflow list -R "$repo" --all --json name,path \
     --jq "[.[] | select(.path != \"$FILE\") | .name | @json] | join(\", \")")
@@ -94,6 +89,12 @@ for repo in "$@"; do
   mkdir -p "$(dirname "$FILE")"
   render "$list" > "$FILE"
   format_stub
+
+  if git cat-file -e "$def:$FILE" 2>/dev/null && git diff --quiet "$def" -- "$FILE"; then
+    echo "   default branch already has the rendered caller"
+    cd "$work"
+    continue
+  fi
 
   if [ -z "$(git status --porcelain -- "$FILE")" ]; then echo "   branch already up to date"
   elif [ "$APPLY" -eq 0 ]; then echo "   [dry run] would commit to $BRANCH:"; git diff HEAD -- "$FILE" | sed 's/^/   | /'
