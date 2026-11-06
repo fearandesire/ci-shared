@@ -1,0 +1,36 @@
+name: ready-canary
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Session-created draft on an agent/ready-canary-* branch in this repository
+        type: string
+        required: true
+
+# Intentionally the original caller contract: Actions permission is absent.
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+
+jobs:
+  canary:
+    runs-on: ubicloud-standard-2
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ inputs.pr }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Promote only the dedicated canary
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          meta=$(gh pr view "$PR_NUMBER" --json headRefName,headRefOid,isCrossRepository \
+            --jq 'select(.isCrossRepository == false) | [.headRefName, .headRefOid] | @tsv')
+          read -r BRANCH SHA <<< "$meta"
+          [[ "$BRANCH" == agent/ready-canary-* ]]
+          export BRANCH SHA
+          python3 tests/test_ready.py --emit-script | bash -e -o pipefail
+          test "$(gh pr view "$PR_NUMBER" --json isDraft --jq .isDraft)" = false

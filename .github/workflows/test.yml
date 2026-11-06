@@ -1,0 +1,32 @@
+name: test
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+  statuses: read
+
+jobs:
+  test:
+    runs-on: ubicloud-standard-2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Regression tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Shell syntax
+        run: |
+          bash -n rollout.sh
+          python3 tests/test_ready.py --emit-script | bash -n
+      - name: Read check states without Actions permission
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ github.head_ref }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          DRY_RUN: '1'
+        run: python3 tests/test_ready.py --emit-script | bash -e -o pipefail
