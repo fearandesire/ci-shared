@@ -6,17 +6,22 @@ copying scripts or editing every repository.
 
 ## ready-when-green
 
-Marks a draft PR ready only when its current head matches the completed successful
-workflow run and every check/status on that head is complete and green, neutral or
-skipped. Restricts promotion to same-repository `agent/*`, `claude/*` and `codex/*`
-branches. `agent-needs-human` holds the PR. Empty check sets, fork heads, changed
-heads, API errors and uninspected label pages never promote. Check results paginate
-past 100 so a late failure cannot be missed.
+Marks a draft PR ready only after a successful workflow run, an external check-suite
+completion, or an explicit PR-number dispatch, and only when every check/status on its
+actual current head is complete and green, neutral or skipped. Restricts promotion to
+same-repository `agent/*`, `claude/*` and `codex/*` branches. `agent-needs-human` holds
+the PR. Empty check sets, fork heads, changed heads, API errors and uninspected label
+pages never promote. Check results paginate past 100 so a late failure cannot be missed.
 
-Pending checks are re-read every 20 seconds for at most 20 minutes. This covers an
-external review that finishes after CI without emitting a matching workflow event.
-An obsolete head, hold label or failed check stops the monitor; a newer matching
-workflow completion cancels the older monitor for that branch. Dry runs never wait.
+Pending checks are re-read every 20 seconds for at most 20 minutes. Successful
+`workflow_run` completions preserve the existing wake-up path; `check_suite.completed`
+also wakes the monitor when an external provider updates GitHub checks. A manual
+dispatch can select a positive PR number when a provider emits no check-suite event.
+Every wake-up resolves or verifies an open same-repository draft on an allowed branch,
+then checks its actual current head, hold label, and complete check/status rollup before
+promotion. An obsolete head, hold label or failed check stops the monitor; a newer
+matching workflow completion cancels the older monitor for that branch. Dry runs
+never wait.
 
 The caller token needs `contents: write`, `pull-requests: write`, `checks: read` and
 `statuses: read`. **Actions read is not needed.** The implementation requests only
@@ -43,6 +48,19 @@ policy forbids reusable jobs, and `--readonly` when that inline job must also re
 a read-only `GITHUB_TOKEN`. Refresh inline copies after shared implementation changes.
 The renderer compares actual bytes instead of skipping merely because a file already
 names the channel or has an inline header.
+
+To wake the monitor manually for a draft PR whose provider has no GitHub Actions or
+check-suite completion event, run this from a maintainer account with the caller
+workflow installed on the repository's default branch:
+
+```bash
+gh workflow run ready-when-green.yml --repo OWNER/REPO -f pr=123
+```
+
+The selected PR must still be an open, same-repository draft on an `agent/`, `claude/`
+or `codex/` branch and must have no `agent-needs-human` hold label. Manual dispatch only
+requests this verification; it does not override failing, pending, changed-head, or
+hold checks.
 
 ## Audit all rollout repositories
 

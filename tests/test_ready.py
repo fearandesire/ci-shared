@@ -10,6 +10,10 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / '.github/workflows/ready-when-green.yml'
+CALLER_TEMPLATE = ROOT / 'caller.yml.tmpl'
+INLINE_TEMPLATE = ROOT / 'inline.yml.tmpl'
+TEST_WORKFLOW = ROOT / '.github/workflows/test.yml'
+CANARY_WORKFLOW = ROOT / '.github/workflows/ready-canary.yml'
 
 
 def script():
@@ -30,6 +34,9 @@ def emit(data):
 if a[:2] == ['pr', 'list']:
     assert 'statusCheckRollup' not in a[a.index('--json')+1]
     emit(f['candidates'])
+elif a[:2] == ['pr', 'view']:
+    assert '--repo' in a and a[a.index('--repo')+1] == os.environ['GH_REPO']
+    print(json.dumps(f['manual_pr']))
 elif a[:2] == ['api', 'graphql']:
     query = next(x[6:] for x in a if x.startswith('query='))
     assert 'workflowRun' not in query and 'checkSuite' not in query
@@ -58,8 +65,11 @@ else:
 def fixture():
     return {
         'candidates': [{'number': 11, 'headRefOid': 'abc123', 'labels': []}],
+        'manual_pr': {'number': 11, 'state': 'OPEN', 'isDraft': True, 'headRefName': 'agent/example',
+                      'headRefOid': 'abc123', 'headRepository': {'name': 'repo'},
+                      'headRepositoryOwner': {'login': 'owner'}},
         'pages': [{'data': {'repository': {'pullRequest': {
-            'headRefOid': 'abc123', 'isDraft': True,
+            'state': 'OPEN', 'headRefOid': 'abc123', 'isDraft': True,
             'headRepository': {'nameWithOwner': 'owner/repo'},
             'labels': {'nodes': [], 'labelPage': {'hasNextPage': False}},
             'commits': {'nodes': [{'commit': {'statusCheckRollup': {'contexts': {
@@ -79,7 +89,8 @@ def checks(data, page=0):
 
 
 class ReadyTests(unittest.TestCase):
-    def run_case(self, data, dry=False, wait=0):
+    def run_case(self, data, dry=False, wait=0, event='workflow_run', pr_input='', app_slug='external-provider',
+                 branch='agent/example', sha='abc123'):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             gh = root / 'gh'
@@ -88,10 +99,13 @@ class ReadyTests(unittest.TestCase):
             (root / 'fixture.json').write_text(json.dumps(data))
             env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'],
                        FIXTURE=str(root / 'fixture.json'), CALLS=str(root / 'calls.jsonl'),
-                       GH_REPO='owner/repo', BRANCH='agent/example', SHA='abc123',
+                       GH_REPO='owner/repo', BRANCH=branch, SHA=sha,
+                       EVENT_NAME=event, PR_NUMBER=pr_input,
+                       RUN_HEAD_REPOSITORY='owner/repo', CHECK_SUITE_APP_SLUG=app_slug,
                        DRY_RUN='1' if dry else '0', WAIT_SECONDS=str(wait), POLL_SECONDS='0')
             result = subprocess.run(['bash', '-c', script()], env=env, text=True, capture_output=True)
-            calls = [json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines()]
+            calls_file = root / 'calls.jsonl'
+            calls = [json.loads(line) for line in calls_file.read_text().splitlines()] if calls_file.exists() else []
             return result, [c for c in calls if c[:2] == ['pr', 'ready']]
 
     def assert_held(self, data):
@@ -107,6 +121,71 @@ class ReadyTests(unittest.TestCase):
         result, mutations = self.run_case(data)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(mutations, [['pr', 'ready', '11']])
+
+    def test_check_suite_completion_wakes_and_checks_current_pr(self):
+        result, mutations = self.run_case(fixture(), event='check_suite')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(mutations, [['pr', 'ready', '11']])
+
+    def test_check_suite_failure_and_ineligible_branch_do_not_promote(self):
+        data = fixture()
+        checks(data).append({'status': 'COMPLETED', 'conclusion': 'FAILURE'})
+        result, mutations = self.run_case(data, event='check_suite')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(mutations, [])
+        result, mutations = self.run_case(fixture(), event='check_suite', branch='wip/example')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('no eligible source branch', result.stdout)
+        self.assertEqual(mutations, [])
+
+    def test_github_actions_check_suite_does_not_self_trigger(self):
+        result, mutations = self.run_case(fixture(), event='check_suite', app_slug='github-actions')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('ignoring a GitHub Actions check suite', result.stdout)
+        self.assertEqual(mutations, [])
+
+    def test_manual_positive_pr_number_resolves_same_repo_draft(self):
+        result, mutations = self.run_case(fixture(), event='workflow_dispatch', pr_input='11')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(mutations, [['pr', 'ready', '11']])
+
+    def test_manual_missing_nonnumeric_and_nonpositive_pr_numbers_fail_closed(self):
+        for number in ('', 'abc', '0', '-2', ' 11'):
+            with self.subTest(number=number):
+                result, mutations = self.run_case(fixture(), event='workflow_dispatch', pr_input=number)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(mutations, [])
+
+    def test_manual_fork_and_unallowed_branch_are_refused(self):
+        for field, value in ((('headRepositoryOwner', 'login'), 'attacker'),
+                             (('headRefName',), 'wip/example'),
+                             (('state',), 'CLOSED')):
+            data = fixture()
+            if len(field) == 2:
+                data['manual_pr'][field[0]][field[1]] = value
+            else:
+                data['manual_pr'][field[0]] = value
+            result, mutations = self.run_case(data, event='workflow_dispatch', pr_input='11')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('not an eligible same-repository draft', result.stdout)
+            self.assertEqual(mutations, [])
+
+    def test_manual_stale_head_hold_and_failed_check_do_not_promote(self):
+        data = fixture()
+        pr(data)['headRefOid'] = 'raced-head'
+        result, mutations = self.run_case(data, event='workflow_dispatch', pr_input='11')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(mutations, [])
+        data = fixture()
+        pr(data)['labels']['nodes'].append({'name': 'agent-needs-human'})
+        result, mutations = self.run_case(data, event='workflow_dispatch', pr_input='11')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(mutations, [])
+        data = fixture()
+        checks(data).append({'status': 'COMPLETED', 'conclusion': 'FAILURE'})
+        result, mutations = self.run_case(data, event='workflow_dispatch', pr_input='11')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(mutations, [])
 
     def test_pending_failed_cancelled_and_unknown_checks_hold(self):
         for check in ({'status': 'IN_PROGRESS'}, {'state': 'PENDING'},
@@ -176,9 +255,28 @@ class ReadyTests(unittest.TestCase):
     def test_permission_contract_and_same_repo_agent_guard(self):
         text = WORKFLOW.read_text()
         self.assertNotIn('      actions:', text)
-        self.assertIn('head_repository.full_name == github.repository', text)
+        self.assertIn("github.event_name == 'workflow_run'", text)
+        self.assertIn("github.event.workflow_run.conclusion == 'success'", text)
+        self.assertIn("github.event_name == 'check_suite'", text)
+        self.assertIn("github.event.check_suite.app.slug != 'github-actions'", text)
+        self.assertIn("github.event_name == 'workflow_dispatch'", text)
         for prefix in ('agent/', 'claude/', 'codex/'):
             self.assertIn("head_branch, '" + prefix + "'", text)
+
+    def test_caller_templates_preserve_workflow_run_and_add_external_and_manual_wakeups(self):
+        for template in (CALLER_TEMPLATE, INLINE_TEMPLATE):
+            text = template.read_text()
+            self.assertIn('  workflow_run:', text)
+            self.assertIn('  check_suite:', text)
+            self.assertIn('    types: [completed]', text)
+            self.assertIn('  workflow_dispatch:', text)
+            self.assertIn('      pr:', text)
+            self.assertIn('        type: string', text)
+
+    def test_repository_script_callers_provide_event_mode(self):
+        self.assertIn('EVENT_NAME: workflow_run', TEST_WORKFLOW.read_text())
+        self.assertIn('RUN_HEAD_REPOSITORY:', TEST_WORKFLOW.read_text())
+        self.assertIn('EVENT_NAME: workflow_dispatch', CANARY_WORKFLOW.read_text())
 
     def test_pending_review_is_rechecked_then_promoted(self):
         data = fixture()

@@ -36,5 +36,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
           BRANCH: ${{ github.head_ref }}
           SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_NAME: workflow_run
+          RUN_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          CHECK_SUITE_APP_SLUG: ''
           DRY_RUN: '1'
         run: python3 tests/test_ready.py --emit-script | bash -e -o pipefail
