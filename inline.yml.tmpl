@@ -7,6 +7,14 @@ on:
   workflow_run:
     workflows: [__WORKFLOWS__]
     types: [completed]
+  check_suite:
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Positive draft pull request number to re-check and mark ready when green
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -14,22 +22,35 @@ permissions:
 jobs:
   ready:
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_repository.full_name == github.repository &&
-      (startsWith(github.event.workflow_run.head_branch, 'agent/') ||
-       startsWith(github.event.workflow_run.head_branch, 'claude/') ||
-       startsWith(github.event.workflow_run.head_branch, 'codex/'))
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       (startsWith(github.event.workflow_run.head_branch, 'agent/') ||
+        startsWith(github.event.workflow_run.head_branch, 'claude/') ||
+        startsWith(github.event.workflow_run.head_branch, 'codex/'))) ||
+      (github.event_name == 'check_suite' &&
+       github.event.action == 'completed' &&
+       github.event.check_suite.app.slug != 'github-actions' &&
+       github.event.repository.full_name == github.repository &&
+       (startsWith(github.event.check_suite.head_branch, 'agent/') ||
+        startsWith(github.event.check_suite.head_branch, 'claude/') ||
+        startsWith(github.event.check_suite.head_branch, 'codex/'))) ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ubicloud-standard-2
     timeout-minutes: 25
     concurrency:
-      group: ready-${{ github.repository }}-${{ github.event.workflow_run.head_branch }}
+      group: ready-${{ github.repository }}-${{ github.event.workflow_run.head_branch || github.event.check_suite.head_branch || github.event.inputs.pr || github.run_id }}
       cancel-in-progress: true
     permissions:
 __JOBPERMS__
     env:
       GH_TOKEN: ${{ secrets.READY_TOKEN || github.token }}
       GH_REPO: ${{ github.repository }}
-      BRANCH: ${{ github.event.workflow_run.head_branch }}
-      SHA: ${{ github.event.workflow_run.head_sha }}
+      EVENT_NAME: ${{ github.event_name }}
+      BRANCH: ${{ github.event.workflow_run.head_branch || github.event.check_suite.head_branch || '' }}
+      SHA: ${{ github.event.workflow_run.head_sha || github.event.check_suite.head_sha || '' }}
+      PR_NUMBER: ${{ github.event.inputs.pr || '' }}
+      RUN_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name || '' }}
+      CHECK_SUITE_APP_SLUG: ${{ github.event.check_suite.app.slug || '' }}
     steps:
 __STEPS__

@@ -20,6 +20,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
+      EVENT_NAME: workflow_dispatch
       PR_NUMBER: ${{ inputs.pr }}
     steps:
       - uses: actions/checkout@v4

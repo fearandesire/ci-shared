@@ -6,6 +6,14 @@ on:
   workflow_run:
     workflows: [__WORKFLOWS__]
     types: [completed]
+  check_suite:
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Positive draft pull request number to re-check and mark ready when green
+        required: true
+        type: string
 
 jobs:
   ready:

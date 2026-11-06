@@ -1,7 +1,7 @@
 name: ready-when-green
 
-# Reusable workflow. Call it from a workflow_run stub in each repo (see caller.yml.tmpl).
-# Marks a draft PR ready for review once every check on its current head commit is green.
+# Reusable workflow. Call it from workflow_run, check_suite, and manual-dispatch stubs
+# in each repo (see caller.yml.tmpl). It never checks out or executes PR code.
 on:
   workflow_call:
     inputs:
@@ -18,18 +18,27 @@ permissions: {}
 
 jobs:
   ready:
-    # Same-repo branches only; fork PRs and failed CI runs are skipped.
-    # Filtering here (not in a step) keeps non-agent runs unbilled: skipped jobs cost no minutes.
+    # Preserve the successful workflow_run gate. A completed external check suite is a
+    # wake-up only; the script resolves and verifies the current PR before polling.
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_repository.full_name == github.repository &&
-      (startsWith(github.event.workflow_run.head_branch, 'agent/') ||
-       startsWith(github.event.workflow_run.head_branch, 'claude/') ||
-       startsWith(github.event.workflow_run.head_branch, 'codex/'))
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       (startsWith(github.event.workflow_run.head_branch, 'agent/') ||
+        startsWith(github.event.workflow_run.head_branch, 'claude/') ||
+        startsWith(github.event.workflow_run.head_branch, 'codex/'))) ||
+      (github.event_name == 'check_suite' &&
+       github.event.action == 'completed' &&
+       github.event.check_suite.app.slug != 'github-actions' &&
+       github.event.repository.full_name == github.repository &&
+       (startsWith(github.event.check_suite.head_branch, 'agent/') ||
+        startsWith(github.event.check_suite.head_branch, 'claude/') ||
+        startsWith(github.event.check_suite.head_branch, 'codex/'))) ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 25
     concurrency:
-      group: ready-${{ github.repository }}-${{ github.event.workflow_run.head_branch }}
+      group: ready-${{ github.repository }}-${{ github.event.workflow_run.head_branch || github.event.check_suite.head_branch || github.event.inputs.pr || github.run_id }}
       cancel-in-progress: true
     permissions:
       contents: write # gh pr ready fails with "Resource not accessible" without it (cli/cli#8910)
@@ -39,14 +48,54 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.READY_TOKEN || github.token }}
       GH_REPO: ${{ github.repository }}
-      # Passed via env, never interpolated into the script: branch names are untrusted input.
-      BRANCH: ${{ github.event.workflow_run.head_branch }}
-      SHA: ${{ github.event.workflow_run.head_sha }}
+      EVENT_NAME: ${{ github.event_name }}
+      # Event fields and user input pass through env, never shell interpolation.
+      BRANCH: ${{ github.event.workflow_run.head_branch || github.event.check_suite.head_branch || '' }}
+      SHA: ${{ github.event.workflow_run.head_sha || github.event.check_suite.head_sha || '' }}
+      PR_NUMBER: ${{ github.event.inputs.pr || '' }}
+      RUN_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name || '' }}
+      CHECK_SUITE_APP_SLUG: ${{ github.event.check_suite.app.slug || '' }}
     steps:
-      - name: Mark green draft PRs ready
+      - name: Resolve and mark green draft PRs ready
         shell: bash
         run: |
           set -euo pipefail
+          prs=''
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            if [[ ! "${PR_NUMBER:-}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "workflow_dispatch requires a positive PR number"
+              exit 1
+            fi
+            manual_pr=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" \
+              --json number,state,isDraft,headRefName,headRefOid,headRepository,headRepositoryOwner)
+            if ! jq -e --arg repo "$GH_REPO" --arg number "$PR_NUMBER" '
+              (.number | tostring) == $number and
+              .state == "OPEN" and
+              .isDraft == true and
+              ((.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")) == $repo and
+              (.headRefName | startswith("agent/") or startswith("claude/") or startswith("codex/"))
+            ' <<< "$manual_pr" >/dev/null; then
+              echo "PR #$PR_NUMBER is not an eligible same-repository draft"
+              exit 0
+            fi
+            BRANCH=$(jq -r .headRefName <<< "$manual_pr")
+            SHA=$(jq -r .headRefOid <<< "$manual_pr")
+            prs="$PR_NUMBER"
+          else
+            if [[ "$EVENT_NAME" == check_suite && "$CHECK_SUITE_APP_SLUG" == github-actions ]]; then
+              echo "ignoring a GitHub Actions check suite"
+              exit 0
+            fi
+            case "$BRANCH" in
+              agent/*|claude/*|codex/*) ;;
+              *) echo "no eligible source branch"; exit 0 ;;
+            esac
+            if [[ "$EVENT_NAME" == workflow_run && \
+                  "$RUN_HEAD_REPOSITORY" != "$GH_REPO" ]]; then
+              echo "workflow_run head is not from this repository"
+              exit 0
+            fi
+          fi
           wait_seconds=${WAIT_SECONDS:-1200}
           poll_seconds=${POLL_SECONDS:-20}
           [[ "$wait_seconds" =~ ^[0-9]{1,4}$ && "$poll_seconds" =~ ^[0-9]{1,2}$ ]] || exit 2
@@ -54,14 +103,16 @@ jobs:
           poll_seconds=$((10#$poll_seconds))
           ((wait_seconds <= 1200 && poll_seconds <= 60)) || exit 2
           if [ "${DRY_RUN:-0}" = 1 ]; then wait_seconds=0; fi
-          # A later external review may not emit a matching workflow_run event.
-          # Wait only while checks are pending, on this same head, within a fixed budget.
-          prs=$(gh pr list --head "$BRANCH" --state open --draft \
-            --json number,headRefOid,labels --jq '
-              .[]
-              | select(.headRefOid == env.SHA)
-              | select(all(.labels[].name; . != "agent-needs-human"))
-              | .number')
+          # External statuses can arrive after any wake-up. Wait only while checks are
+          # pending, on this same head, within a fixed budget.
+          if [[ "$EVENT_NAME" != workflow_dispatch ]]; then
+            prs=$(gh pr list --head "$BRANCH" --state open --draft \
+              --json number,headRefOid,labels --jq '
+                .[]
+                | select(.headRefOid == env.SHA)
+                | select(all(.labels[].name; . != "agent-needs-human"))
+                | .number')
+          fi
 
           if [ -z "$prs" ]; then echo "nothing ready yet for $BRANCH @ ${SHA:0:7}"; exit 0; fi
           for n in $prs; do
@@ -76,7 +127,7 @@ jobs:
                   query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
                     repository(owner: $owner, name: $name) {
                       pullRequest(number: $number) {
-                        headRefOid isDraft
+                        state headRefOid isDraft
                         headRepository { nameWithOwner }
                         labels(first: 100) { nodes { name } labelPage: pageInfo { hasNextPage } }
                         commits(last: 1) { nodes { commit { statusCheckRollup {
@@ -94,6 +145,7 @@ jobs:
                   .data.repository.pullRequest
                   | (.commits.nodes[0].commit.statusCheckRollup.contexts.nodes // []) as $checks
                   | if (.isDraft != true)
+                       or (.state != "OPEN")
                        or (.headRefOid != env.SHA)
                        or (.headRepository.nameWithOwner != env.GH_REPO)
                        or (.labels.labelPage.hasNextPage != false)
