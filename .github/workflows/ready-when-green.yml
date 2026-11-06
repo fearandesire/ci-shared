@@ -28,6 +28,7 @@ jobs:
        startsWith(github.event.workflow_run.head_branch, 'codex/'))
     runs-on: ${{ inputs.runner }}
     permissions:
+      actions: read # gh's statusCheckRollup query includes checkSuite.workflowRun
       contents: write # gh pr ready fails with "Resource not accessible" without it (cli/cli#8910)
       pull-requests: write
       checks: read
