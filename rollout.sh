@@ -69,6 +69,16 @@ format_stub() {
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 
 for repo in "$@"; do
+  # Fail closed on unreadable inventory; explicit adoption is not drift to repair.
+  owner_controlled="$(python3 - "$HERE/owner-controlled-repos.json" "$repo" <<'PYGUARD'
+import json, sys
+print("yes" if sys.argv[2].lower() in {r.lower() for r in json.load(open(sys.argv[1]))} else "no")
+PYGUARD
+)"
+  if [ "$owner_controlled" = yes ]; then
+    echo "== $repo: owner-controlled pstack flow; rollout skipped"
+    continue
+  fi
   echo "== $repo ($MODE)"
   dir="$work/${repo//\//_}"
   gh repo clone "$repo" "$dir" -- --depth 1 -q
