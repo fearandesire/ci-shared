@@ -115,7 +115,7 @@ PYGUARD
 
   if [ "$APPLY" -eq 1 ] && [ -z "$(gh pr list -R "$repo" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')" ]; then
     gh pr create -R "$repo" --base "$def" --head "$BRANCH" --title "$MSG" \
-      --body "Adds the \`ready-when-green\` workflow ($MODE; source \`$CENTRAL@$REF\`). Draft PRs on \`agent/*\`, \`claude/*\` and \`codex/*\` branches flip to ready once every check on their head commit is green. Skips PRs labelled \`agent-needs-human\`. Runs on \`ubicloud-standard-2\`."
+      --body "Adds the \`ready-when-green\` workflow ($MODE; source \`$CENTRAL@$REF\`). Draft PRs on \`agent/*\`, \`claude/*\` and \`codex/*\` branches flip to ready once every check on their head commit is green. Respects existing explicit WIP, hold, blocked and do-not-merge labels. Runs on \`ubicloud-standard-2\`."
   fi
   cd "$work"
 done

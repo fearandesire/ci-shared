@@ -123,12 +123,14 @@ class ReadyTests(unittest.TestCase):
         self.assert_held(data)
 
     def test_hold_label_before_or_after_candidate_query(self):
-        data = fixture()
-        data['candidates'][0]['labels'] = [{'name': 'agent-needs-human'}]
-        self.assert_held(data)
-        data = fixture()
-        pr(data)['labels']['nodes'].append({'name': 'agent-needs-human'})
-        self.assert_held(data)
+        for name in ('wip', 'WIP', 'hold', 'blocked', 'do-not-merge', 'needs-human', 'agent-needs-human'):
+            with self.subTest(label=name):
+                data = fixture()
+                data['candidates'][0]['labels'] = [{'name': name}]
+                self.assert_held(data)
+                data = fixture()
+                pr(data)['labels']['nodes'].append({'name': name})
+                self.assert_held(data)
 
     def test_changed_head_and_non_draft_hold(self):
         for field, value in (('headRefOid', 'new-head'), ('isDraft', False)):
@@ -199,7 +201,7 @@ class ReadyTests(unittest.TestCase):
             if change == 'head':
                 changed[0]['data']['repository']['pullRequest']['headRefOid'] = 'new-head'
             else:
-                changed[0]['data']['repository']['pullRequest']['labels']['nodes'] = [{'name': 'agent-needs-human'}]
+                changed[0]['data']['repository']['pullRequest']['labels']['nodes'] = [{'name': 'wip'}]
             data['rounds'] = [pending, changed]
             result, mutations = self.run_case(data, wait=10)
             self.assertEqual(result.returncode, 0, result.stderr)
