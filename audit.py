@@ -25,6 +25,9 @@ def run_block(text):
 
 def inspect(repo, ref):
     row = {'repo': repo, 'installed': True}
+    owner_controlled = repo.lower() in {
+        name.lower() for name in json.loads((ROOT / 'owner-controlled-repos.json').read_text())
+    }
     try:
         try:
             entry = gh('api', f'repos/{repo}/contents/{FILE}')
@@ -34,10 +37,16 @@ def inspect(repo, ref):
             prs = gh('pr', 'list', '--repo', repo, '--state', 'open', '--limit', '100',
                      '--json', 'number,title,headRefName,url')
             prs = [p for p in prs if p['title'] == 'ci: mark agent draft PRs ready when checks pass']
+            if owner_controlled:
+                return dict(row, installed=False, mode='owner-controlled',
+                            status='retired-pending-rollout' if prs else 'owner-controlled',
+                            pendingPRs=prs)
             if len(prs) != 1:
                 return dict(row, installed=False, status='missing', pendingPRs=prs)
             row.update(installed=False, pr=prs[0]['number'], url=prs[0]['url'])
             entry = gh('api', f'repos/{repo}/contents/{FILE}?ref={prs[0]["headRefName"]}')
+        if owner_controlled:
+            return dict(row, mode='owner-controlled', status='retired-caller-installed')
         body = base64.b64decode(entry['content']).decode()
         uses = re.findall(r'(?m)^\s*uses:\s*(\S*ci-shared/\S+)\s*$', body)
         if uses:
@@ -78,7 +87,7 @@ def main():
         print(f'{args.ref}: {tag["sha"]}')
         for row in rows:
             print(f'{row["repo"]:45} {row["status"]:30} {row.get("mode", "")}')
-    bad = any(row['status'] not in ('current', 'current-token-required') for row in rows)
+    bad = any(row['status'] not in ('current', 'current-token-required', 'owner-controlled') for row in rows)
     bad = bad or bool(args.expected_sha and args.expected_sha != tag['sha'])
     return 1 if args.check and bad else 0
 

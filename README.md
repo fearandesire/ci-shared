@@ -44,6 +44,19 @@ a read-only `GITHUB_TOKEN`. Refresh inline copies after shared implementation ch
 The renderer compares actual bytes instead of skipping merely because a file already
 names the channel or has an inline header.
 
+## Owner-controlled repositories
+
+`owner-controlled-repos.json` identifies pstack-adopted repositories. They remain
+in the read-only audit inventory, but an intentionally absent ready helper is healthy.
+An installed legacy caller or an open rollout PR is reported as a migration conflict,
+not as a reason to restore the helper. `rollout.sh` skips these repositories in every
+mode, even when explicitly named, before cloning or writing. An operator who
+intentionally reverses the workflow choice must first review and remove the entry
+from this opt-out list; there is no accidental command-line bypass.
+
+This changes neither the shared implementation nor the existing `v2` channel.
+Other repositories keep their current behavior.
+
 ## Audit all rollout repositories
 
 ```bash
