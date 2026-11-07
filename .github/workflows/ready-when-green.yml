@@ -60,7 +60,7 @@ jobs:
             --json number,headRefOid,labels --jq '
               .[]
               | select(.headRefOid == env.SHA)
-              | select(all(.labels[].name; . != "agent-needs-human"))
+              | select(all(.labels[].name; ascii_downcase | IN("wip", "hold", "blocked", "do-not-merge", "needs-human", "agent-needs-human") | not))
               | .number')
 
           if [ -z "$prs" ]; then echo "nothing ready yet for $BRANCH @ ${SHA:0:7}"; exit 0; fi
@@ -97,7 +97,7 @@ jobs:
                        or (.headRefOid != env.SHA)
                        or (.headRepository.nameWithOwner != env.GH_REPO)
                        or (.labels.labelPage.hasNextPage != false)
-                       or any(.labels.nodes[].name; . == "agent-needs-human")
+                       or any(.labels.nodes[].name; ascii_downcase | IN("wip", "hold", "blocked", "do-not-merge", "needs-human", "agent-needs-human"))
                     then "held"
                     elif ($checks | length == 0) then "pending"
                     elif all($checks[];

@@ -9,7 +9,7 @@ copying scripts or editing every repository.
 Marks a draft PR ready only when its current head matches the completed successful
 workflow run and every check/status on that head is complete and green, neutral or
 skipped. Restricts promotion to same-repository `agent/*`, `claude/*` and `codex/*`
-branches. `agent-needs-human` holds the PR. Empty check sets, fork heads, changed
+branches. Existing WIP, hold, blocked and do-not-merge labels hold the PR. Empty check sets, fork heads, changed
 heads, API errors and uninspected label pages never promote. Check results paginate
 past 100 so a late failure cannot be missed.
 
@@ -68,6 +68,15 @@ python3 audit.py --json --check --expected-sha <tested-release-commit>
 it reports installed callers, open rollout PRs, reference/permission drift and inline
 copies. `current-token-required` verifies inline bytes, not the secret's existence or
 permissions; verify those with a real canary in that repository.
+
+## Hold migration
+
+The source supports existing explicit hold labels without requiring an agent-specific
+queue label. Before retiring old live assignments, verify the running caller uses
+this tested implementation (including inline copies), or disable its draft promotion.
+A draft alone is not a safe hold while an older automatic promoter remains enabled.
+Record unresolved decisions and preserve their hold before removing assignments.
+Updating main does not by itself update the release channel or inline consumers.
 
 ## Test and advance the release channel
 
