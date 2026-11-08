@@ -1,3 +1,5 @@
+# DEPRECATED: ready-when-green rollout is retired in favor of pstack poteto-mode autopilot-full.
+# Do not run this script for new adoption. Retained for historical reference.
 #!/usr/bin/env bash
 # Add (or refresh) the ready-when-green stub in each target repo, via a PR.
 # Idempotent: re-running updates the existing PR branch, and skips repos already on this REF.
@@ -119,3 +121,5 @@ PYGUARD
   fi
   cd "$work"
 done
+
+

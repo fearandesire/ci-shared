@@ -98,3 +98,9 @@ version-specific immutable tags remain immutable; `v2` is the deliberately movin
 compatibility channel. Run the audit, refresh inline consumers, and verify actual
 consumer workflow runs. Changes to the permission contract require a new channel and
 an explicit migration instead of silently breaking existing callers.
+
+
+## Deprecation
+
+The ready-when-green workflow and rollout.sh are retired in favor of the owner-led pstack poteto-mode autopilot-full delivery flow (see fearandesire/pstack-owned). Do not roll out ready-when-green to new repos. This repo is retained for historical reference and other shared workflows.
+
